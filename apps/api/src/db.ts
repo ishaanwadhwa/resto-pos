@@ -6,7 +6,6 @@ let pool: Pool | null = null;
 
 export function getPool(): Pool {
   if (!pool) {
-    console.log("🔌 [DB] Creating new pool...");
     pool = new Pool({ 
       connectionString: process.env.DATABASE_URL,
       connectionTimeoutMillis: 5000,

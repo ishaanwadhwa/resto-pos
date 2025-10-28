@@ -71,3 +71,16 @@ CREATE TABLE ticket_items (
   label TEXT NOT NULL,
   qty NUMERIC(8,2) NOT NULL DEFAULT 1
 );
+
+-- Idempotency keys to prevent duplicate processing of retried requests
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id UUID NOT NULL,
+  endpoint TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  request_hash TEXT NOT NULL,
+  response_json JSONB,
+  status TEXT NOT NULL CHECK (status IN ('PENDING','COMPLETED','FAILED')) DEFAULT 'PENDING',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(tenant_id, endpoint, idempotency_key)
+);
