@@ -5,5 +5,5 @@ import { ordersRouter } from "./modules/orders/router";
 export const router = Router();
 
 router.use(menuRouter);
-router.use(ordersRouter);
+router.use("/orders", ordersRouter);
 

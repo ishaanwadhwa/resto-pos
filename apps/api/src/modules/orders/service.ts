@@ -1,5 +1,6 @@
 import { getPool } from "../../db";
 import { hashBody } from "../../lib/hash";
+import { redisPublishClient } from "../../lib/redis";
 
 export interface OrderItemInput { menuItemId: string; qty?: number; notes?: string | null }
 
@@ -97,7 +98,7 @@ export async function createOrderIdempotent(
   type: string,
   items: OrderItemInput[],
   idempotencyKey?: string
-) {
+): Promise<{ result: { orderId: string; ticketId: string; total_cents: number }, fromCache: boolean }> {
   if (!idempotencyKey) {
     throw Object.assign(new Error("Idempotency-Key required"), { status: 400 });
   }
@@ -132,7 +133,7 @@ export async function createOrderIdempotent(
       }
 
       if (row.status === "COMPLETED" && row.response_json) {
-        return row.response_json;
+        return { result: row.response_json, fromCache: true };
       }
 
       throw Object.assign(new Error("request in progress"), { status: 409 });
@@ -150,7 +151,20 @@ export async function createOrderIdempotent(
     );
 
     await client.query("COMMIT");
-    return result;
+
+    // Publish after successful commit (only for fresh creations)
+    try {
+      const channel = `tenant:${tenantId}:tickets.created`;
+      const payload = JSON.stringify({ tenantId, storeId, orderId: result.orderId, ticketId: result.ticketId, total_cents: result.total_cents });
+      const delivered = await redisPublishClient.publish(channel, payload);
+      if (delivered === 0) {
+        console.warn("Redis publish had no subscribers:", channel);
+      }
+    } catch (e) {
+      console.error("Redis publish failed", e);
+    }
+
+    return { result, fromCache: false };
   } catch (err) {
     try {
       await client.query(
@@ -162,6 +176,137 @@ export async function createOrderIdempotent(
     } catch {}
     try { await client.query("ROLLBACK"); } catch {}
     throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function addPayment(
+  tenantId: string,
+  storeId: string,
+  orderId: string,
+  body: { method: "CASH"|"CARD"|"UPI"|"WALLET"|"COUPON"; amount_cents: number; ref?: string },
+  idemKey?: string | null
+) {
+  const client = await getPool().connect();
+  try {
+    if (!idemKey) {
+      const err: any = new Error("Idempotency-Key required");
+      err.status = 400; throw err;
+    }
+    const endpoint = "/orders/:id/pay";
+    const reqHash = hashBody({ orderId, ...body });
+
+    await client.query("BEGIN");
+
+    // 1) Lock order & verify tenant/store
+    const ord = await client.query(
+      `SELECT id, total_cents, status FROM orders
+       WHERE id=$1 AND tenant_id=$2 AND store_id=$3 FOR UPDATE`,
+      [orderId, tenantId, storeId]
+    );
+    if (!ord.rows[0]) { const e:any=new Error("order not found"); e.status=404; throw e; }
+    if (ord.rows[0].status === "CANCELED") { const e:any=new Error("order canceled"); e.status=400; throw e; }
+
+    // 2) Upsert idempotency row
+    const inserted = await client.query(
+      `INSERT INTO idempotency_keys (tenant_id, endpoint, idempotency_key, request_hash, status)
+       VALUES ($1,$2,$3,$4,'PENDING')
+       ON CONFLICT (tenant_id, endpoint, idempotency_key) DO NOTHING
+       RETURNING id`,
+      [tenantId, endpoint, idemKey, reqHash]
+    );
+
+    if (inserted.rowCount === 0) {
+      const row = await client.query(
+        `SELECT status, request_hash, response_json FROM idempotency_keys
+         WHERE tenant_id=$1 AND endpoint=$2 AND idempotency_key=$3`,
+        [tenantId, endpoint, idemKey]
+      );
+      const r = row.rows[0];
+      if (!r) { const e:any=new Error("idempotency lookup failed"); e.status=409; throw e; }
+      if (r.request_hash !== reqHash) { const e:any=new Error("idempotency key reused with different payload"); e.status=400; throw e; }
+      if (r.status === "COMPLETED" && r.response_json) { await client.query("COMMIT"); return r.response_json; }
+      const e:any=new Error("request in progress"); e.status=409; throw e;
+    }
+
+    // 3) Payment application with overpay/change logic
+    // 3.1 Current totals
+    const paidRes = await client.query(
+      `SELECT COALESCE(SUM(amount_cents), 0) AS paid FROM payments WHERE order_id = $1`,
+      [orderId]
+    );
+    const paidCents = Number(paidRes.rows[0].paid);
+    const totalCents = Number(ord.rows[0].total_cents);
+    const remaining = Math.max(totalCents - paidCents, 0);
+
+    const amount = body.amount_cents;
+
+    // 3.2 Handle overpay / change logic
+    let applied = amount;
+    let change = 0;
+
+    if (amount > remaining) {
+      if (body.method === "CASH") {
+        applied = remaining;
+        change = amount - remaining;
+      } else {
+        const e: any = new Error("Overpayment not allowed for this method");
+        e.status = 400;
+        throw e;
+      }
+    }
+
+    // 3.3 Insert payment with change_cents recorded
+    await client.query(
+      `INSERT INTO payments (order_id, method, amount_cents, ref, change_cents)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [orderId, body.method, applied, body.ref ?? null, change]
+    );
+
+    // 4) Recalculate total paid and close if needed
+    const paidNowRes = await client.query(
+      `SELECT COALESCE(SUM(amount_cents), 0) AS paid FROM payments WHERE order_id = $1`,
+      [orderId]
+    );
+    const paidNow = Number(paidNowRes.rows[0].paid);
+    let closed = false;
+
+    if (paidNow >= totalCents) {
+      await client.query(
+        `UPDATE orders SET status = 'CLOSED', closed_at = now() WHERE id = $1`,
+        [orderId]
+      );
+      closed = true;
+    }
+
+    const remainingNow = Math.max(totalCents - paidNow, 0);
+
+    const response = {
+      orderId,
+      total_cents: totalCents,
+      paid_cents: paidNow,
+      remaining_cents: remainingNow,
+      closed,
+      change_cents: change,
+    };
+    await client.query(
+      `UPDATE idempotency_keys
+         SET status='COMPLETED', response_json=$4::jsonb
+       WHERE tenant_id=$1 AND endpoint=$2 AND idempotency_key=$3`,
+      [tenantId, endpoint, idemKey, JSON.stringify(response)]
+    );
+
+    await client.query("COMMIT");
+    return response;
+  } catch (e) {
+    try { await client.query(
+      `UPDATE idempotency_keys SET status='FAILED'
+       WHERE tenant_id=$1 AND endpoint=$2 AND idempotency_key=$3`,
+      [tenantId, "/orders/:id/pay", idemKey]
+    ); } catch {}
+    try { await client.query("ROLLBACK"); } catch {}
+    throw e;
   } finally {
     client.release();
   }

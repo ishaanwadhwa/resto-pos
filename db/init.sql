@@ -84,3 +84,23 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE(tenant_id, endpoint, idempotency_key)
 );
+
+-- Payments module
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'payment_method') THEN
+    CREATE TYPE payment_method AS ENUM ('CASH','CARD','UPI','WALLET','COUPON');
+  END IF;
+END $$;
+
+CREATE TABLE IF NOT EXISTS payments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+  method payment_method NOT NULL,
+  amount_cents INT NOT NULL CHECK (amount_cents > 0),
+  ref TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Ensure payments table has change_cents column for cash change handling
+ALTER TABLE payments
+  ADD COLUMN IF NOT EXISTS change_cents INT NOT NULL DEFAULT 0 CHECK (change_cents >= 0);
