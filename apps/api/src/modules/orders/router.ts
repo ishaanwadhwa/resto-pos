@@ -6,6 +6,11 @@ import { payBody } from "../payments/schemas";
 
 const router = Router();
 
+router.get(
+  "/",
+  controller.list
+);
+
 router.post(
   "/",
   validate(createOrderBody, "body"),

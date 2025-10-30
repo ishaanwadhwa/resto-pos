@@ -158,3 +158,41 @@ export async function addPayment(
     throw e;
   }
 }
+
+const OPEN_STATUSES = ["OPEN","IN_KITCHEN","READY"] as const;
+type ListOpts = { open?: boolean; status?: string; from?: Date; to?: Date };
+
+export async function listOrders(tenantId: string, storeId: string, opts: ListOpts = {}) {
+  const where: any = { tenant_id: tenantId, store_id: storeId };
+  if (opts.open) {
+    where.status = { in: OPEN_STATUSES as any };
+  } else if (opts.status) {
+    where.status = opts.status as any;
+  }
+
+  const start = opts.from ?? new Date(); start.setHours(0, 0, 0, 0);
+  const end = opts.to ?? new Date(); end.setHours(23, 59, 59, 999);
+  where.created_at = { gte: start, lte: end };
+
+  const rows = await prisma.orders.findMany({
+    where,
+    orderBy: { created_at: "desc" },
+    select: {
+      id: true,
+      type: true,
+      status: true,
+      total_cents: true,
+      created_at: true,
+      items: { select: { name_snapshot: true, qty: true, unit_price_cents: true } },
+    },
+  });
+
+  return rows.map((r: any) => ({
+    id: r.id,
+    type: r.type,
+    status: r.status,
+    total_cents: r.total_cents,
+    created_at: r.created_at,
+    order_items: r.items,
+  }));
+}

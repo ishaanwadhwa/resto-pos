@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { createOrderIdempotent, addPayment } from "./service";
+import { createOrderIdempotent, addPayment, listOrders } from "./service";
 
 export async function create(req: Request, res: Response, next: NextFunction) {
   try {
@@ -24,5 +24,15 @@ export async function pay(req: Request, res: Response, next: NextFunction) {
     const idemKey = req.header("idempotency-key") || req.header("x-idempotency-key") || "";
     const result = await addPayment(tenantId, storeId, orderId, body, idemKey);
     res.status(201).json(result);
+  } catch (e) { next(e); }
+}
+
+export async function list(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { tenantId, storeId } = req as any;
+    const open = (req.query.open ?? "").toString().toLowerCase() === "true";
+    const status = open ? undefined : (req.query.status as string | undefined);
+    const data = await listOrders(tenantId, storeId, { open, status });
+    res.json(data);
   } catch (e) { next(e); }
 }

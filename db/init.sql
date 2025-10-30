@@ -104,3 +104,7 @@ CREATE TABLE IF NOT EXISTS payments (
 -- Ensure payments table has change_cents column for cash change handling
 ALTER TABLE payments
   ADD COLUMN IF NOT EXISTS change_cents INT NOT NULL DEFAULT 0 CHECK (change_cents >= 0);
+
+-- Index to speed up orders list queries (tenant/store/status/date)
+CREATE INDEX IF NOT EXISTS idx_orders_tenant_store_status_created
+ON orders (tenant_id, store_id, status, created_at DESC);
