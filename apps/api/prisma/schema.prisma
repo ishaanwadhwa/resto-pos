@@ -1,0 +1,197 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+// orders.type and orders.status are TEXT with check constraints; model as String
+// tickets.status is TEXT with check constraints; model as String
+
+enum payment_method {
+  CASH
+  CARD
+  UPI
+  WALLET
+  COUPON
+  @@map("payment_method")
+}
+
+// Models
+model tenants {
+  id          String   @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  name        String   @db.Text
+  slug        String   @unique @db.Text
+  created_at  DateTime @default(now()) @db.Timestamptz(6)
+  
+  stores      stores[]
+  menu_items  menu_items[]
+  orders      orders[]
+  kitchen_stations kitchen_stations[]
+  tickets     tickets[]
+  idempotency_keys idempotency_keys[]
+
+  @@map("tenants")
+}
+
+model stores {
+  id          String   @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  tenant_id   String   @db.Uuid
+  name        String   @db.Text
+  timezone    String?  @db.Text
+  created_at  DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant      tenants  @relation(fields: [tenant_id], references: [id])
+  menu_items  menu_items[]
+  orders      orders[]
+  kitchen_stations kitchen_stations[]
+  tickets     tickets[]
+
+  @@index([tenant_id])
+  @@map("stores")
+}
+
+model menu_items {
+  id           String  @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  tenant_id    String  @db.Uuid
+  store_id     String  @db.Uuid
+  name         String  @db.Text
+  price_cents  Int
+  active       Boolean @default(true)
+
+  tenant       tenants @relation(fields: [tenant_id], references: [id])
+  store        stores  @relation(fields: [store_id], references: [id])
+  order_items  order_items[]
+
+  @@index([tenant_id])
+  @@index([store_id])
+  @@map("menu_items")
+}
+
+model orders {
+  id            String   @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  tenant_id     String   @db.Uuid
+  store_id      String   @db.Uuid
+  type          String   @db.Text
+  status        String   @default("OPEN") @db.Text
+  subtotal_cents Int     @default(0)
+  total_cents   Int      @default(0)
+  created_at    DateTime @default(now()) @db.Timestamptz(6)
+  closed_at     DateTime? @db.Timestamptz(6)
+
+  tenant        tenants  @relation(fields: [tenant_id], references: [id])
+  store         stores   @relation(fields: [store_id], references: [id])
+  items         order_items[]
+  tickets       tickets[]
+  payments      payments[]
+
+  @@index([tenant_id])
+  @@index([store_id])
+  @@map("orders")
+}
+
+model order_items {
+  id                String  @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  order_id          String  @db.Uuid
+  menu_item_id      String  @db.Uuid
+  name_snapshot     String  @db.Text
+  unit_price_cents  Int
+  qty               Decimal @db.Decimal(8, 2)
+  notes             String? @db.Text
+
+  order             orders      @relation(fields: [order_id], references: [id])
+  menu_item         menu_items  @relation(fields: [menu_item_id], references: [id])
+  ticket_items      ticket_items[]
+
+  @@index([order_id])
+  @@index([menu_item_id])
+  @@map("order_items")
+}
+
+model kitchen_stations {
+  id         String  @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  tenant_id  String  @db.Uuid
+  store_id   String  @db.Uuid
+  name       String  @db.Text
+
+  tenant     tenants @relation(fields: [tenant_id], references: [id])
+  store      stores  @relation(fields: [store_id], references: [id])
+  tickets    tickets[]
+
+  @@index([tenant_id])
+  @@index([store_id])
+  @@map("kitchen_stations")
+}
+
+model tickets {
+  id          String   @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  tenant_id   String   @db.Uuid
+  store_id    String   @db.Uuid
+  order_id    String   @db.Uuid
+  station_id  String   @db.Uuid
+  status      String   @default("QUEUED") @db.Text
+  created_at  DateTime @default(now()) @db.Timestamptz(6)
+  ready_at    DateTime? @db.Timestamptz(6)
+
+  tenant      tenants          @relation(fields: [tenant_id], references: [id])
+  store       stores           @relation(fields: [store_id], references: [id])
+  order       orders           @relation(fields: [order_id], references: [id])
+  station     kitchen_stations @relation(fields: [station_id], references: [id])
+  items       ticket_items[]
+
+  @@index([tenant_id])
+  @@index([store_id])
+  @@index([order_id])
+  @@index([station_id])
+  @@map("tickets")
+}
+
+model ticket_items {
+  id           String  @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  ticket_id    String  @db.Uuid
+  order_item_id String @db.Uuid
+  label        String  @db.Text
+  qty          Decimal @db.Decimal(8, 2)
+
+  ticket       tickets     @relation(fields: [ticket_id], references: [id])
+  order_item   order_items @relation(fields: [order_item_id], references: [id])
+
+  @@index([ticket_id])
+  @@index([order_item_id])
+  @@map("ticket_items")
+}
+
+model idempotency_keys {
+  id              String   @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  tenant_id       String   @db.Uuid
+  endpoint        String   @db.Text
+  idempotency_key String   @db.Text
+  request_hash    String   @db.Text
+  response_json   Json?
+  status          String   @db.Text
+  created_at      DateTime @default(now()) @db.Timestamptz(6)
+
+  tenant          tenants  @relation(fields: [tenant_id], references: [id])
+
+  @@unique([tenant_id, endpoint, idempotency_key])
+  @@index([tenant_id])
+  @@map("idempotency_keys")
+}
+
+model payments {
+  id            String         @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  order_id      String         @db.Uuid
+  method        payment_method
+  amount_cents  Int
+  ref           String?        @db.Text
+  created_at    DateTime       @default(now()) @db.Timestamptz(6)
+  change_cents  Int            @default(0)
+
+  order         orders         @relation(fields: [order_id], references: [id])
+
+  @@index([order_id])
+  @@map("payments")
+}
